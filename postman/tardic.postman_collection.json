@@ -1,0 +1,289 @@
+{
+  "info": {
+    "_postman_id": "b6f2b8e0-6f7a-4b1e-9b6b-3a1c2f7e9d10",
+    "name": "Tardic",
+    "description": "Flujo completo del MVP: subir un audio, ver el progreso avanzar por trozos, y descargar la transcripción. Pensado para correr en orden con el Collection Runner contra un VPS real (ver docs/despliegue-vps.md).\n\nEl paso '02 - Subir audio' guarda el `id` devuelto en la variable de colección `recording_id`; el resto de los requests lo usan solo, sin copiar/pegar a mano.\n\nRutas verificadas contra el código real de `src/tardic/api/` (no son una suposición): prefijo `/v1`, subida en `POST /v1/recordings` (multipart, campo `file` + `diarize` opcional), estado en `GET /v1/recordings/{id}`, transcripción en `GET /v1/recordings/{id}/transcript` (JSON) y `GET /v1/recordings/{id}/transcript.txt` (texto plano), listado en `GET /v1/recordings`, borrado en `DELETE /v1/recordings/{id}` (204), salud en `GET /health` sin autenticación. Corrida de punta a punta contra el stack real (db+api+worker vía docker compose) el 25/08: subida, avance por trozos, transcript, txt, listado y borrado, todos verificados con curl.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-API-Key", "type": "string" },
+      { "key": "value", "value": "{{api_key}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080", "type": "string" },
+    { "key": "api_key", "value": "", "type": "string" },
+    {
+      "key": "recording_id",
+      "value": "",
+      "type": "string",
+      "description": "La llena sola el request '02 - Subir audio'. No la edites a mano salvo para depurar."
+    }
+  ],
+  "item": [
+    {
+      "name": "00 - Health",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Sin autenticación a propósito: es lo que revisa Docker (healthcheck del servicio api) y, eventualmente, un monitor externo. Trae `database` (bool) y `worker_seen_seconds_ago` (null si el worker nunca ha mandado latido)."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('database está sana', () => pm.expect(body.database).to.eql(true));",
+              "console.log('worker_seen_seconds_ago:', body.worker_seen_seconds_ago);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 - Listar (antes de subir)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/recordings?limit=20&offset=0",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings"],
+          "query": [
+            { "key": "limit", "value": "20" },
+            { "key": "offset", "value": "0" }
+          ]
+        },
+        "description": "Solo para ver qué había antes de correr el flujo. No es parte crítica del camino feliz."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Subir audio",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": [],
+              "description": "Selecciona un audio real aquí antes de correr (AGENTS.md: nada de audio de clientes en el repo, así que no viene embebido). Cualquier formato con mime audio/* o video/* sirve."
+            },
+            {
+              "key": "diarize",
+              "type": "text",
+              "value": "false",
+              "disabled": true,
+              "description": "Opcional. En false por defecto en la API; actívalo (true) solo si quieres separar hablantes en esta corrida."
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{base_url}}/v1/recordings",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings"]
+        },
+        "description": "Responde rápido (RecordingCreated): el trabajo pesado lo hace el worker después. Guarda el `id` en la variable de colección `recording_id` para que el resto de los requests lo usen solos."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "const body = pm.response.json();",
+              "pm.test('trae id', () => pm.expect(body.id).to.be.a('string'));",
+              "pm.collectionVariables.set('recording_id', body.id);",
+              "console.log('recording_id guardado:', body.id);",
+              "pm.test('status inicial es UPLOADING o QUEUED', () => {",
+              "  pm.expect(['UPLOADING', 'QUEUED']).to.include(body.status);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Consultar estado",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/recordings/{{recording_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings", "{{recording_id}}"]
+        },
+        "description": "Corre esto repetido (Runner con delay, o a mano) hasta que `status` sea COMPLETED. `progress.percent` y `progress.eta_seconds` avanzan trozo por trozo, no son una barra falsa. Si `status` es FAILED, `error` trae el mensaje para humanos (sin rutas del servidor ni trazas, eso vive en el log)."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "console.log('status:', body.status, '| stage:', body.stage, '| percent:', body.progress && body.progress.percent);",
+              "if (body.status === 'FAILED') {",
+              "  console.error('processing_error:', body.error);",
+              "}",
+              "pm.test('no expone rutas de servidor en error', () => {",
+              "  if (body.error) {",
+              "    pm.expect(body.error).to.not.match(/\\/(data|app|opt)\\//);",
+              "  }",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Obtener JSON",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/recordings/{{recording_id}}/transcript",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings", "{{recording_id}}", "transcript"]
+        },
+        "description": "Solo tiene sentido cuando el estado en el paso 03 ya es COMPLETED (si no, 404 o 409 según decida el agente C). Trae segmentos con timestamps de la línea de tiempo completa, hablante (si se corrió diarización) y `processing_time_seconds` — útil para calcular el RTF real del VPS (docs/despliegue-vps.md, paso 4)."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('trae segments', () => pm.expect(body.segments).to.be.an('array'));",
+              "if (body.duration_seconds && body.processing_time_seconds) {",
+              "  const rtf = body.processing_time_seconds / body.duration_seconds;",
+              "  console.log('RTF real de esta corrida:', rtf.toFixed(3));",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Descargar TXT",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/recordings/{{recording_id}}/transcript.txt",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings", "{{recording_id}}", "transcript.txt"]
+        },
+        "description": "El entregable de descarga plano (storage.py: audio/<id>/transcript.txt). Guárdalo con 'Save Response > Save to a file' desde Postman para revisarlo a ojo."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('no está vacío', () => pm.expect(pm.response.text().length).to.be.above(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Listar (con el nuevo audio)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/recordings?limit=20&offset=0",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings"],
+          "query": [
+            { "key": "limit", "value": "20" },
+            { "key": "offset", "value": "0" }
+          ]
+        },
+        "description": "Debe incluir `recording_id` en `items`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "const id = pm.collectionVariables.get('recording_id');",
+              "pm.test('aparece el recording recién subido', () => {",
+              "  pm.expect(body.items.map(i => i.id)).to.include(id);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 - Borrar",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/recordings/{{recording_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "recordings", "{{recording_id}}"]
+        },
+        "description": "Último paso del flujo: limpia el audio, el wav derivado, los checkpoints y el transcript.txt de disco además de la fila en base de datos. Corre esto al final para no dejar basura de pruebas en el volumen `audio-data` del VPS."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('204 No Content (o 200)', () => {",
+              "  pm.expect([200, 204]).to.include(pm.response.code);",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+# Stack de Tardic: db + api + worker, para un VPS que YA corre 25
+# contenedores de producción de otros servicios
+# detrás de un nginx que sirve el apex. Ver docs/despliegue-vps.md
+# para el paso a paso completo del servidor.
+#
+# Nota de Compose v2 (no-Swarm): `deploy.resources.limits` se IGNORA sin
+# `docker compose --compatibility`, y nadie va a acordarse de pasar esa
+# bandera cada vez. Por eso los límites de CPU/memoria del worker van como
+# `cpus:`/`mem_limit:` a nivel de servicio (forma "legacy" pero la única que
+# aplica de verdad sin flags extra). Verificado con
+# `docker compose config --format json` (ver reporte del agente).
+
+x-tardic-image: &tardic_build
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  image: tardic:latest
+  # .env vive en la raíz del repo (junto a este archivo). Compose lo usa dos
+  # veces: para sustituir ${VARS} en este YAML, y aquí para inyectarlo entero
+  # como entorno del contenedor. Un solo archivo, una sola fuente de verdad.
+  env_file:
+    - .env
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tardic-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TARDIC_DB_USER:-tardic}
+      POSTGRES_PASSWORD: ${TARDIC_DB_PASSWORD:?define TARDIC_DB_PASSWORD en .env}
+      POSTGRES_DB: ${TARDIC_DB_NAME:-tardic}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Sin `ports:`: nadie fuera de la red interna de este compose necesita
+    # hablarle a Postgres directamente. Menos superficie en un host compartido.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${TARDIC_DB_USER:-tardic} -d ${TARDIC_DB_NAME:-tardic}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Servicio de un solo uso: corre las migraciones y termina (exit 0).
+  # Por qué un servicio dedicado y no un entrypoint dentro de `api`:
+  #   - la API y el worker comparten la misma imagen; si las migraciones
+  #     vivieran en un entrypoint de `api`, el worker igual podría arrancar
+  #     antes de que el esquema esté listo (no depende de `api`, depende de
+  #     `db`) y reventar contra tablas que no existen todavía;
+  #   - `depends_on: condition: service_completed_successfully` dice, sin
+  #     ambigüedad, "nadie sirve tráfico ni toma trabajo hasta que esto salga
+  #     con éxito" — un entrypoint solo lo garantizaría para el servicio que
+  #     lo lleva encima;
+  #   - un fallo de migración queda como un contenedor con exit code != 0,
+  #     visible en `docker compose ps`, en vez de escondido en el log de
+  #     arranque de la api.
+  migrate:
+    <<: *tardic_build
+    container_name: tardic-migrate
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *tardic_build
+    container_name: tardic-api
+    restart: unless-stopped
+    command:
+      [
+        "uvicorn",
+        "tardic.api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8080",
+      ]
+    # Puerto en el HOST configurable: ese VPS ya tiene 25 contenedores usando
+    # puertos. NO asumas que 8080 está libre — revisa con
+    # `docker ps --format '{{.Ports}}'` y `ss -ltnp` antes del primer deploy
+    # (docs/despliegue-vps.md, paso 2) y ajusta TARDIC_API_PORT en .env.
+    ports:
+      - "${TARDIC_API_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - audio-data:/data
+      # La api no transcribe, pero storage.py y el borrado de recordings
+      # comparten el mismo volumen de audio con el worker.
+      - hf-cache:/home/tardic/.cache/huggingface
+    # Sin curl en la imagen (se evitó a propósito para no engordarla): el
+    # healthcheck usa el propio intérprete de Python del venv contra
+    # GET /health. Ese endpoint responde sin X-API-Key (es lo que monitorea
+    # tanto Docker como, eventualmente, nginx/uptime externo).
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *tardic_build
+    container_name: tardic-worker
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/entrypoint-worker.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Sin `ports:`: el worker no habla HTTP, solo toma trabajo de la tabla
+    # processing_jobs (SELECT ... FOR UPDATE SKIP LOCKED).
+    volumes:
+      - audio-data:/data
+      - hf-cache:/home/tardic/.cache/huggingface
+    # --- Límites de recursos: la parte que de verdad importa en este host ---
+    # `cpus:` SÍ aplica en Compose v2 sin flags (a diferencia de
+    # deploy.resources.limits.cpus, que se ignora salvo con --compatibility).
+    # Conservador por defecto: 1 núcleo. Un worker de Whisper sin tope toma
+    # todos los núcleos que le den durante HORAS por cada audio largo; en un
+    # host con 25 contenedores de producción eso ahoga el sistema. Sube este
+    # número solo después de medir `nproc`/`free -h`/carga real del VPS (ver
+    # docs/despliegue-vps.md, paso 1) y deja siempre 1-2 núcleos libres para
+    # lo que ya corre ahí.
+    # Docker da 10 s de gracia por defecto tras SIGTERM. El worker solo puede
+    # soltar el trabajo limpiamente en la frontera de un trozo, y un trozo dura
+    # ~15 min: con 10 s, casi ningún `docker compose down` alcanza a cerrar bien
+    # y el job queda huérfano. 60 s no cubren un trozo entero a propósito —
+    # esperar 15 minutos en cada deploy sería peor, y no hace falta: los
+    # checkpoints por trozo conservan el trabajo y el worker recupera sus
+    # propios jobs al arrancar. Esto solo compra el caso barato: si el corte cae
+    # entre trozos, el apagado es limpio.
+    stop_grace_period: 60s
+    cpus: ${TARDIC_WORKER_CPUS:-1.0}
+    # Memoria holgada a propósito: turbo (large-v3-turbo int8) más el
+    # chunking midieron ~1.5-2 GB en el benchmark del 25/08 (AGENTS.md). Si
+    # baja de 2g el worker puede morir a media transcripción larga, que es
+    # peor que dejarle margen de sobra — este límite SÍ existe para que un
+    # bug de memoria no arrastre a producción con él, no para ahorrar RAM.
+    mem_limit: ${TARDIC_WORKER_MEM_LIMIT:-2g}
+
+volumes:
+  # postgres — datos reales, NUNCA `docker volume prune` sobre esto.
+  pgdata:
+  # audio original + wav + checkpoints de trozos + transcript.txt — datos
+  # reales del usuario, mismo trato que pgdata.
+  audio-data:
+  # caché de Hugging Face / faster-whisper. El modelo (~1.6 GB) se descarga
+  # aquí la primera vez que arranca el worker y sobrevive a `docker compose
+  # down` / recreaciones del contenedor. Solo se pierde con `docker volume rm`
+  # explícito o `docker volume prune` (por eso está prohibido, ver el doc).
+  hf-cache:

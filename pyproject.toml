@@ -1,0 +1,83 @@
+[project]
+name = "tardic"
+version = "0.1.0"
+description = "Plataforma privada de inteligencia de conversaciones: audio entra, transcripción estructurada sale."
+authors = [
+    { name = "Ady-val", email = "adal_vb@outlook.com" }
+]
+requires-python = ">=3.12"
+
+# Política del doc 02 §10: cada dependencia responde qué problema resuelve, si
+# ya hay algo que lo haga, si se mantiene y cuánta complejidad suma.
+dependencies = [
+    # API
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.20",   # sin esto FastAPI no recibe multipart/form-data
+    "pydantic-settings>=2.6",
+    # Persistencia y cola (la cola ES Postgres: sin broker, doc 02 §6)
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    # Motor STT
+    "faster-whisper>=1.2.1",
+    # Métricas del proceso (RAM/CPU por trozo, doc 03 §14)
+    "psutil>=7.2.2",
+]
+
+[project.optional-dependencies]
+# La diarización arrastra torch: ~2 GB en la imagen para una función que el MVP
+# tiene apagada. Se instala aparte cuando se vaya a usar de verdad.
+diarization = [
+    "pyannote.audio>=4.0.7",
+]
+# Solo para el benchmark de la Fase 0, no para producción.
+benchmark = [
+    "jiwer>=4.0.0",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",          # cliente de pruebas de FastAPI
+    "ruff>=0.8",
+]
+
+[project.scripts]
+tardic-worker = "tardic.worker.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Los `slow` descargan modelos y tardan: se corren a propósito con
+# `pytest -m slow`, nunca por accidente en una corrida normal ni en CI.
+addopts = ["-m", "not slow"]
+markers = [
+    "slow: usa modelos reales y audio real; no corre en CI ni por defecto",
+    "db: necesita una PostgreSQL viva",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+ignore = [
+    "S101",   # assert en tests
+    # `class X(str, Enum)` en vez de `StrEnum`: SQLAlchemy serializa estos
+    # enums a columnas de texto y el patrón str+Enum es el que está probado
+    # contra la base. Migrarlo no aporta nada y toca el contrato de datos.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "E501"]
+"benchmark/*" = ["S", "E501"]
+# S603: llamar a ffmpeg/ffprobe por subprocess es el propósito del módulo. Los
+# argumentos son rutas que construye el servidor a partir de UUIDs, nunca texto
+# del cliente, y siempre como lista (jamás `shell=True`).
+"src/tardic/core/audio.py" = ["S603"]

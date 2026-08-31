@@ -1,0 +1,2 @@
+clip,engine,model,load_s,diarize_s,rtf,peak_rss_mb,speakers,turns,ts
+sesion-10min,pyannote,speaker-diarization-3.1,2.1,586.8,0.978,2471,2,105,2026-08-25 10:42

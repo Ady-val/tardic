@@ -1,0 +1,29 @@
+# Nada de esto debe viajar al contexto de build: ni pesa lo mismo, ni es del
+# runtime, ni (en el caso de audio) debe salir nunca del disco del developer.
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+.git/
+.github/
+
+# Fixtures de audio y resultados del benchmark: pesan cientos de MB y AGENTS.md
+# prohíbe audio de clientes en el repo; no hay razón para meterlos a una imagen.
+benchmark/audio/
+benchmark/results/
+benchmark/tools/
+
+# Documentación y despliegue: no son parte del código que se ejecuta.
+docs/
+postman/
+*.md
+
+# Secretos y entornos locales.
+.env
+.env.*
+!.env.example
+
+# Datos que en producción viven en volúmenes, nunca en la imagen.
+data/
+pgdata/

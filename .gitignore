@@ -1,0 +1,46 @@
+# --- Secretos. Lo primero, porque este repo se publica en GitHub ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- Datos y modelos: pesados, regenerables o privados ---
+# Audio de clientes y sus derivados NUNCA entran al repo (RNF-06).
+data/
+benchmark/audio/*.wav
+benchmark/audio/ref-*.txt
+benchmark/tools/
+
+# 🔴 Los RESULTADOS del benchmark son transcripciones VERBATIM de reuniones
+# reales (una negociación con un cliente, una capacitación). Que el audio esté
+# ignorado no basta: el .txt, el .json y el .rttm dicen lo mismo en texto, y el
+# alineado hasta separa quién dijo qué. Se ignora el directorio completo y solo
+# se dejan pasar los CSV de métricas, que no contienen una sola palabra de las
+# conversaciones — solo tiempos, RTF, RAM y WER.
+benchmark/results/*
+!benchmark/results/summary.csv
+!benchmark/results/summary-diarization.csv
+*.wav
+*.m4a
+*.mp3
+*.ogg
+*.opus
+*.flac
+!tests/fixtures/*.wav
+
+# --- Local ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
